@@ -29,6 +29,12 @@ def _pick_namespace(ns: str) -> None:
 
 namespace_raw = st.text_input("Namespace", key="search_namespace")
 namespace = namespace_raw.strip().rstrip("/")
+if namespace and namespace == bucket:
+    st.warning(
+        "Namespace is the same as the S3 bucket name — that's almost always a mistake "
+        "(the namespace is a subfolder *inside* the bucket, e.g. `your-namespace.anoxj`). "
+        "Use 'Discover it from the bucket' below to find the real one."
+    )
 with st.expander("Don't know the namespace? Discover it from the bucket"):
     if st.button("List namespaces under root prefix"):
         try:
