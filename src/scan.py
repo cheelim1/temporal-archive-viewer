@@ -3,8 +3,7 @@ new or changed ones concurrently, populating the sqlite cache in index_store.
 """
 
 import json
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Callable
 
@@ -71,34 +70,34 @@ def list_object_summaries(
     """
     days = _daterange(start_date, end_date)
     hour_set = set(hours) if hours is not None else None
-    done = 0
-    done_lock = threading.Lock()
     errors: list[tuple[str, str]] = []
 
     def list_day(day: date) -> list[dict]:
-        nonlocal done
         prefix = f"{root_prefix}{namespace}/{day:%Y}/{day:%m}/{day:%d}/"
         try:
             objects = list(s3_client.iter_objects_recursive(client, bucket, prefix))
             if hour_set is not None:
                 objects = [o for o in objects if _hour_of(o["Key"], prefix) in hour_set]
+            return objects
         except Exception as e:
-            with done_lock:
-                errors.append((day.isoformat(), s3_client.friendly_error(e)))
-            objects = []
-        with done_lock:
-            done += 1
-            current = done
-        if progress_cb:
-            progress_cb(current, len(days))
-        return objects
+            # list.append from a worker thread is safe under the GIL; what's
+            # NOT safe is calling progress_cb (Streamlit UI) from here — see
+            # the as_completed loop below, which is why that happens on the
+            # main thread instead.
+            errors.append((day.isoformat(), s3_client.friendly_error(e)))
+            return []
 
     if not days:
         return [], []
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for objects in executor.map(list_day, days):
-            results.extend(objects)
+        futures = {executor.submit(list_day, day): day for day in days}
+        done = 0
+        for future in as_completed(futures):
+            results.extend(future.result())
+            done += 1
+            if progress_cb:
+                progress_cb(done, len(days))
     return results, errors
 
 
@@ -153,12 +152,9 @@ def scan_and_index(
     skipped and reported so the rest of the batch still completes.
     """
     total = len(summaries)
-    done = 0
-    done_lock = threading.Lock()
     failures: list[tuple[str, str]] = []
 
     def process(summary: dict) -> None:
-        nonlocal done
         key = summary["Key"]
         try:
             etag = summary.get("ETag", "").strip('"')
@@ -176,16 +172,15 @@ def scan_and_index(
                     rows,
                 )
         except Exception as e:
-            with done_lock:
-                failures.append((key, s3_client.friendly_error(e)))
-        with done_lock:
-            done += 1
-            current = done
-        if progress_cb:
-            progress_cb(current, total)
+            failures.append((key, s3_client.friendly_error(e)))
 
     if not summaries:
         return []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(executor.map(process, summaries))
+        futures = [executor.submit(process, summary) for summary in summaries]
+        done = 0
+        for _ in as_completed(futures):
+            done += 1
+            if progress_cb:
+                progress_cb(done, total)
     return failures

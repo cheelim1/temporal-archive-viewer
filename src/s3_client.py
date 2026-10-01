@@ -51,7 +51,10 @@ def friendly_error(e: Exception) -> str:
         if code == "NoSuchBucket":
             return "That bucket does not exist (or is not visible with this profile/region)."
         return f"AWS error ({code}): {e}"
-    return str(e)
+    # Some exceptions (e.g. streamlit.errors.NoSessionContext) carry no
+    # message at all — str(e) is "". A blank error box tells the user
+    # nothing happened to go wrong, which is worse than a generic one.
+    return str(e) or f"Unexpected error: {type(e).__name__}"
 
 
 def list_prefix(client, bucket: str, prefix: str) -> tuple[list[str], list[dict]]:
